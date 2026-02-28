@@ -1,64 +1,75 @@
 import streamlit as st
 from PIL import Image
-from transformers import BlipProcessor, BlipForConditionalGeneration
+from transformers import AutoProcessor, AutoModelForVision2Seq
 import torch
 import pandas as pd
-from io import BytesIO
 
-st.set_page_config(page_title="Museum Archive AI", page_icon="🏛️", layout="wide")
+st.set_page_config(page_title="Museum Dual-Labeler", page_icon="🏛️", layout="wide")
 
 @st.cache_resource
 def load_model():
-    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    # Using Florence-2-base
+    model_id = "microsoft/Florence-2-base" 
+    model = AutoModelForVision2Seq.from_pretrained(model_id, trust_remote_code=True).eval()
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     return processor, model, device
 
 processor, model, device = load_model()
 
-st.title("🏛️ Museum Image-to-Text Labeling System")
-st.write("Upload multiple images to generate a descriptive archive for semantic search.")
+def get_florence_output(image, task_prompt):
+    inputs = processor(text=task_prompt, images=image, return_tensors="pt").to(device)
+    generated_ids = model.generate(
+        input_ids=inputs["input_ids"],
+        pixel_values=inputs["pixel_values"],
+        max_new_tokens=512,
+        num_beams=3
+    )
+    results = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    return results.replace(task_prompt, "").strip()
 
-# 1. Multi-file uploader
+st.title("🏛️ Dual-Layer Museum Labeling")
+st.write("Generating both short captions and detailed visual analysis.")
+
 uploaded_files = st.file_uploader("Upload artifacts...", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
 if uploaded_files:
     data_records = []
     
-    if st.button("Process All Images"):
-        cols = st.columns(3) # Display in a grid
-        
-        for idx, uploaded_file in enumerate(uploaded_files):
+    if st.button("Process Archive"):
+        for uploaded_file in uploaded_files:
             image = Image.open(uploaded_file).convert('RGB')
             
-            with st.spinner(f'Analyzing {uploaded_file.name}...'):
-                inputs = processor(image, return_tensors="pt").to(device)
-                out = model.generate(**inputs, max_new_tokens=60)
-                description = processor.decode(out[0], skip_special_tokens=True).capitalize()
+            with st.spinner(f'Processing {uploaded_file.name}...'):
+                # Task 1: Short Caption
+                short_desc = get_florence_output(image, "<CAPTION>")
                 
-                # Store record
+                # Task 2: Detailed Description
+                long_desc = get_florence_output(image, "<DETAILED_CAPTION>")
+                
                 data_records.append({
                     "Filename": uploaded_file.name,
-                    "Generated_Description": description
+                    "Short_Caption": short_desc,
+                    "Detailed_Description": long_desc
                 })
                 
-                # Show in UI
-                with cols[idx % 3]:
-                    st.image(image, caption=uploaded_file.name, use_container_width=True)
-                    st.info(description)
+                # Display to Curator
+                with st.expander(f"View Results: {uploaded_file.name}"):
+                    col1, col2 = st.columns([1, 2])
+                    with col1:
+                        st.image(image, use_container_width=True)
+                    with col2:
+                        st.subheader("Short Caption (Alt-Text)")
+                        st.info(short_desc)
+                        st.subheader("Detailed Analysis")
+                        st.success(long_desc)
 
-        # 2. Display the Searchable Table
+        # Final Table and Export
         st.divider()
-        st.subheader("📋 Generated Metadata Table")
         df = pd.DataFrame(data_records)
+        st.write("### Review Final Metadata")
         st.dataframe(df, use_container_width=True)
-
-        # 3. Export to CSV
+        
         csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Labels as CSV",
-            data=csv,
-            file_name="museum_labels.csv",
-            mime="text/csv",
-        )
+        st.download_button("📥 Download Master CSV", csv, "museum_dual_labels.csv", "text/csv")
