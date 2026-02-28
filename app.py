@@ -2,14 +2,13 @@ import streamlit as st
 from PIL import Image
 from transformers import BlipProcessor, BlipForConditionalGeneration
 import torch
+import pandas as pd
+from io import BytesIO
 
-# --- Page Config ---
-st.set_page_config(page_title="Museum Image Labeler", page_icon="🖼️")
+st.set_page_config(page_title="Museum Archive AI", page_icon="🏛️", layout="wide")
 
-# --- Model Loading (Cached to prevent reloading) ---
 @st.cache_resource
 def load_model():
-    # 'base' is fast; swap to 'large' for more detail if your PC has a GPU
     processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
     model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -18,39 +17,48 @@ def load_model():
 
 processor, model, device = load_model()
 
-# --- UI Components ---
-st.title("🏛️ Museum Image-to-Text Labeler")
-st.write("Upload a digital image of an artifact or painting to generate a searchable description.")
+st.title("🏛️ Museum Image-to-Text Labeling System")
+st.write("Upload multiple images to generate a descriptive archive for semantic search.")
 
-uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+# 1. Multi-file uploader
+uploaded_files = st.file_uploader("Upload artifacts...", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-if uploaded_file is not None:
-    # Display the image
-    image = Image.open(uploaded_file).convert('RGB')
-    st.image(image, caption='Uploaded Museum Object', use_container_width=True)
+if uploaded_files:
+    data_records = []
     
-    # Generate Button
-    if st.button("Generate Description"):
-        with st.spinner('Analyzing the artwork...'):
-            # Process the image
-            inputs = processor(image, return_tensors="pt").to(device)
+    if st.button("Process All Images"):
+        cols = st.columns(3) # Display in a grid
+        
+        for idx, uploaded_file in enumerate(uploaded_files):
+            image = Image.open(uploaded_file).convert('RGB')
             
-            # Generate the text
-            # max_new_tokens controls the length of the description
-            out = model.generate(**inputs, max_new_tokens=50)
-            description = processor.decode(out[0], skip_special_tokens=True)
-            
-            st.success("Analysis Complete!")
-            
-            # Display Results
-            st.subheader("Generated Metadata")
-            edited_description = st.text_area("Descriptive Label:", value=description.capitalize())
-            
-            # Technical Tags (Extracted from the text)
-            tags = edited_description.split()
-            st.write("**Suggested Search Tags:**")
-            st.info(", ".join([f"#{tag.strip(',.')}" for tag in tags if len(tag) > 3]))
+            with st.spinner(f'Analyzing {uploaded_file.name}...'):
+                inputs = processor(image, return_tensors="pt").to(device)
+                out = model.generate(**inputs, max_new_tokens=60)
+                description = processor.decode(out[0], skip_special_tokens=True).capitalize()
+                
+                # Store record
+                data_records.append({
+                    "Filename": uploaded_file.name,
+                    "Generated_Description": description
+                })
+                
+                # Show in UI
+                with cols[idx % 3]:
+                    st.image(image, caption=uploaded_file.name, use_container_width=True)
+                    st.info(description)
 
-            # Future "Save" function placeholder
-            if st.button("Confirm and Save to Archive"):
-                st.write("Description saved to database (simulated)!")
+        # 2. Display the Searchable Table
+        st.divider()
+        st.subheader("📋 Generated Metadata Table")
+        df = pd.DataFrame(data_records)
+        st.dataframe(df, use_container_width=True)
+
+        # 3. Export to CSV
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Labels as CSV",
+            data=csv,
+            file_name="museum_labels.csv",
+            mime="text/csv",
+        )
